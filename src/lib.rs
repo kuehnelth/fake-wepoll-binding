@@ -1,24 +1,25 @@
 use bitflags::bitflags;
+use libc;
 use std::io;
 use std::ops::Drop;
 use std::os::raw::c_int;
-use std::os::windows::io::AsRawSocket;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::io::RawFd;
 use std::ptr;
 use std::time::Duration;
-use wepoll_sys as sys;
 
-/// An enum for the various `EPOLL_CTL_*` constants.
-#[repr(u32)]
+#[repr(i32)]
+#[allow(non_camel_case_types)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
 pub enum Operation {
     /// An socket to monitor should be added.
-    Add = sys::EPOLL_CTL_ADD,
+    Add = libc::EPOLL_CTL_ADD,
 
     /// An socket that is being monitored should be removed.
-    Delete = sys::EPOLL_CTL_DEL,
+    Delete = libc::EPOLL_CTL_DEL,
 
     /// An socket that is being monitored should be modified.
-    Modify = sys::EPOLL_CTL_MOD,
+    Modify = libc::EPOLL_CTL_MOD,
 }
 
 bitflags! {
@@ -30,51 +31,53 @@ bitflags! {
     /// * EPOLLEXCLUSIVE
     /// * EPOLLWAKEUP
     pub struct EventFlag: u32 {
-        const ERR = sys::EPOLLERR;
-        const HUP = sys::EPOLLHUP;
-        const IN = sys::EPOLLIN;
-        const MSG = sys::EPOLLMSG;
-        const ONESHOT = sys::EPOLLONESHOT;
-        const OUT = sys::EPOLLOUT;
-        const PRI = sys::EPOLLPRI;
-        const RDBAND = sys::EPOLLRDBAND;
-        const RDHUP = sys::EPOLLRDHUP;
-        const RDNORM = sys::EPOLLRDNORM;
-        const WRBAND = sys::EPOLLWRBAND;
-        const WRNORM = sys::EPOLLWRNORM;
+        const ERR = libc::EPOLLERR as u32;
+        const HUP = libc::EPOLLHUP as u32;
+        const IN = libc::EPOLLIN as u32;
+        const MSG = libc::EPOLLMSG as u32;
+        const ONESHOT = libc::EPOLLONESHOT as u32;
+        const OUT = libc::EPOLLOUT as u32;
+        const PRI = libc::EPOLLPRI as u32;
+        const RDBAND = libc::EPOLLRDBAND as u32;
+        const RDHUP = libc::EPOLLRDHUP as u32;
+        const RDNORM = libc::EPOLLRDNORM as u32;
+        const WRBAND = libc::EPOLLWRBAND as u32;
+        const WRNORM = libc::EPOLLWRNORM as u32;
     }
 }
 
 /// A single epoll event.
+#[repr(C)]
+#[cfg_attr(target_arch = "x86_64", repr(packed))]
+#[derive(Clone, Copy)]
 pub struct Event {
-    raw: sys::epoll_event,
+    pub events: u32,
+    pub data: u64,
 }
 
 impl Event {
     /// Creates a new epoll event.
     pub fn new(flags: EventFlag, data: u64) -> Self {
         Event {
-            raw: sys::epoll_event {
-                events: flags.bits(),
-                data: sys::epoll_data { u64: data },
-            },
+            events: flags.bits(),
+            data: data,
         }
     }
 
     /// Returns the flags of this event.
     pub fn flags(&self) -> EventFlag {
-        EventFlag::from_bits_truncate(self.raw.events)
+        EventFlag::from_bits_truncate(self.events)
     }
 
     /// Returns the user data that is associated with this event.
     pub fn data(&self) -> u64 {
-        unsafe { self.raw.data.u64 }
+        self.data
     }
 }
 
 /// A collection of events produced by wepoll.
 pub struct Events {
-    raw: Vec<sys::epoll_event>,
+    raw: Vec<Event>,
 }
 
 impl Events {
@@ -128,9 +131,8 @@ impl<'a> Iterator for Iter<'a> {
 
         // epoll_wait() doesn't report back the flags of events, so we can just
         // set them to 0.
-        let event = Event::new(EventFlag::empty(), unsafe {
-            self.events.raw[self.index].data.u64
-        });
+        let event =
+            Event::new(EventFlag::empty(), self.events.raw[self.index].data);
 
         self.index += 1;
 
@@ -146,7 +148,7 @@ impl<'a> Iterator for Iter<'a> {
 /// Whereas epoll on Linux supports arbitrary file descriptors, wepoll (and thus
 /// this wrapper) only supports Windows sockets.
 pub struct Epoll {
-    handle: sys::HANDLE,
+    handle: RawFd,
 }
 
 impl Epoll {
@@ -163,11 +165,7 @@ impl Epoll {
     /// let epoll = Epoll::new().expect("Failed to create a new Epoll");
     /// ```
     pub fn new() -> io::Result<Epoll> {
-        let handle = unsafe { sys::epoll_create(1) };
-
-        if handle.is_null() {
-            return Err(io::Error::last_os_error());
-        }
+        let handle = unsafe { libc::epoll_create1(0) };
 
         Ok(Epoll { handle })
     }
@@ -198,9 +196,9 @@ impl Epoll {
         };
 
         let received = unsafe {
-            sys::epoll_wait(
+            libc::epoll_wait(
                 self.handle,
-                events.raw.as_mut_ptr(),
+                events.raw.as_mut_ptr() as *mut libc::epoll_event,
                 events.capacity() as c_int,
                 timeout_ms,
             )
@@ -237,7 +235,7 @@ impl Epoll {
     ///   .register(&socket, EventFlag::OUT | EventFlag::ONESHOT, 42)
     ///   .unwrap();
     /// ```
-    pub fn register<T: AsRawSocket>(
+    pub fn register<T: AsRawFd>(
         &self,
         socket: &T,
         flags: EventFlag,
@@ -268,7 +266,7 @@ impl Epoll {
     ///   .reregister(&socket, EventFlag::IN | EventFlag::ONESHOT, 42)
     ///   .unwrap();
     /// ```
-    pub fn reregister<T: AsRawSocket>(
+    pub fn reregister<T: AsRawFd>(
         &self,
         socket: &T,
         flags: EventFlag,
@@ -296,12 +294,12 @@ impl Epoll {
     ///
     /// poll.deregister(&socket).unwrap();
     /// ```
-    pub fn deregister<T: AsRawSocket>(&self, socket: &T) -> io::Result<()> {
+    pub fn deregister<T: AsRawFd>(&self, socket: &T) -> io::Result<()> {
         let result = unsafe {
-            sys::epoll_ctl(
+            libc::epoll_ctl(
                 self.handle,
                 Operation::Delete as c_int,
-                socket.as_raw_socket() as sys::SOCKET,
+                socket.as_raw_fd() as RawFd,
                 ptr::null_mut(),
             )
         };
@@ -313,7 +311,7 @@ impl Epoll {
         Ok(())
     }
 
-    fn register_or_reregister<T: AsRawSocket>(
+    fn register_or_reregister<T: AsRawFd>(
         &self,
         socket: &T,
         flags: EventFlag,
@@ -323,11 +321,12 @@ impl Epoll {
         let mut event = Event::new(flags, data);
 
         let result = unsafe {
-            sys::epoll_ctl(
+            let e = &mut event as *mut _ as *mut libc::epoll_event;
+            libc::epoll_ctl(
                 self.handle,
                 operation as c_int,
-                socket.as_raw_socket() as sys::SOCKET,
-                &mut event.raw,
+                socket.as_raw_fd() as RawFd,
+                e,
             )
         };
 
@@ -344,7 +343,7 @@ unsafe impl Send for Epoll {}
 
 impl Drop for Epoll {
     fn drop(&mut self) {
-        if unsafe { sys::epoll_close(self.handle) } == -1 {
+        if unsafe { libc::close(self.handle) } == -1 {
             panic!("epoll_close() failed: {}", io::Error::last_os_error());
         }
     }

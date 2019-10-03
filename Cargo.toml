@@ -1,18 +1,16 @@
 [package]
-name = "wepoll-binding"
-version = "1.0.4"
-authors = ["Yorick Peterse <yorickpeterse@gmail.com>"]
+name = "fake-wepoll-binding"
+version = "0.0.1"
+authors = ["Thomas Kühnel <kuehnelth@gmail.com>"]
 edition = "2018"
-description = "Safe bindings to the wepoll library"
-repository = "https://gitlab.com/yorickpeterse/wepoll-binding"
+description = "Safe bindings to epoll that look like wepoll-binding"
+repository = "https://github.com/kuehnelth/fake-wepoll-binding"
 readme = "README.md"
 license = "MPL-2.0"
-keywords = ["wepoll", "poll", "windows", "epoll"]
-categories = ["api-bindings", "os::windows-apis"]
+keywords = ["epoll", "poll", "linux"]
+categories = ["api-bindings", "os::linux-apis"]
 
-[package.metadata.docs.rs]
-default-target = "x86_64-pc-windows-msvc"
 
 [dependencies]
-wepoll-sys = "^1.0.3"
 bitflags = "^1.0"
+libc = "0.2"
